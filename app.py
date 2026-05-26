@@ -39,6 +39,10 @@ def save_to_notion(task_content, sender_name):
         print(f"[Notion error] {response.status_code}: {response.text}", flush=True)
     return response.status_code == 200
 
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers.get("X-Line-Signature", "")
