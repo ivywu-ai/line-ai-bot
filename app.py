@@ -23,10 +23,10 @@ def save_to_notion(task_content, sender_name):
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
+        "Notion-Version": "2025-09-03"
     }
     data = {
-        "parent": {"database_id": NOTION_DB_ID},
+        "parent": {"type": "data_source_id", "data_source_id": NOTION_DB_ID},
         "properties": {
             "Task": {"title": [{"text": {"content": task_content}}]},
             "Date": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
@@ -35,6 +35,8 @@ def save_to_notion(task_content, sender_name):
         }
     }
     response = requests.post(url, headers=headers, json=data)
+    if response.status_code != 200:
+        print(f"[Notion error] {response.status_code}: {response.text}", flush=True)
     return response.status_code == 200
 
 @app.route("/webhook", methods=["POST"])
