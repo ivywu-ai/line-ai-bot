@@ -30,7 +30,6 @@ def save_to_notion(task_content, sender_name):
         "properties": {
             "Task": {"title": [{"text": {"content": task_content}}]},
             "Date": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
-            "Inbox (To Do Dump)": {"checkbox": True},
             "備註": {"rich_text": [{"text": {"content": f"來自 LINE：{sender_name}"}}]}
         }
     }
