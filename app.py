@@ -16,31 +16,95 @@ genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DB_ID = os.environ["NOTION_DB_ID"]
+NOTION_DB_ID = os.environ["NOTION_DB_ID"]  # 後母的家（All Tasks Archive）
+# 艾庭的點子暫存庫（在「艾庭的工作面板」底下）
+NOTION_IDEAS_DB_ID = os.environ.get("NOTION_IDEAS_DB_ID", "c946327f-b5bc-4373-aa5f-b78a7ca4e47b")
 
-def save_to_notion(task_content, sender_name):
-    url = "https://api.notion.com/v1/pages"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2025-09-03"
-    }
+NOTION_HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Content-Type": "application/json",
+    "Notion-Version": "2025-09-03",
+}
+
+
+def today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def parse_command(text):
+    """辨識關鍵字並回傳 (種類, 內容)。
+    待辦／記錄 -> task；點子 -> idea；其餘 -> (None, None) 走 Gemini 聊天。
+    分隔符可以是空白（半/全形）或冒號（半/全形）。
+    """
+    text = text.strip()
+    routes = [("點子", "idea"), ("待辦", "task"), ("記錄", "task")]
+    for keyword, kind in routes:
+        if text.startswith(keyword):
+            rest = text[len(keyword):].lstrip(" 　:：\t")
+            return kind, rest.strip()
+    return None, None
+
+
+def format_task_name(raw):
+    """用 Gemini 把隨手打的話改寫成符合好初命名規則的待辦標題。"""
+    prompt = (
+        "你是好初早餐的待辦命名助理。把下面這句話改寫成一個乾淨的待辦標題，規則：\n"
+        "1. 動詞開頭，一眼看出要做什麼動作（不要只有名詞堆疊）\n"
+        "2. 如果句中提到分店（敦南／中山／一店／二店），標題最前面加「店名｜」前綴，例如「敦南｜」\n"
+        "3. 15 個字以內，精簡\n"
+        "4. 只回傳標題本身一行，不要句號、不要引號、不要任何解釋\n"
+        f"原句：{raw}"
+    )
+    try:
+        resp = model.generate_content(prompt)
+        name = resp.text.strip().splitlines()[0].strip()
+        name = name.strip('「」"\'')
+        return name or raw
+    except Exception as e:
+        print(f"[Gemini naming error] {e}", flush=True)
+        return raw
+
+
+def save_to_notion(raw_content, sender_name):
+    """寫進後母的家，標題套命名規則，原話留在備註。"""
+    task_name = format_task_name(raw_content)
     data = {
         "parent": {"type": "data_source_id", "data_source_id": NOTION_DB_ID},
         "properties": {
-            "Task": {"title": [{"text": {"content": task_content}}]},
-            "Date": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
-            "備註": {"rich_text": [{"text": {"content": f"來自 LINE：{sender_name}"}}]}
-        }
+            "Task": {"title": [{"text": {"content": task_name}}]},
+            "Date": {"date": {"start": today_str()}},
+            "備註": {"rich_text": [{"text": {"content": f"來自 LINE：{sender_name}（原話：{raw_content}）"}}]},
+        },
     }
-    response = requests.post(url, headers=headers, json=data)
+    response = requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=data)
     if response.status_code != 200:
-        print(f"[Notion error] {response.status_code}: {response.text}", flush=True)
-    return response.status_code == 200
+        print(f"[Notion task error] {response.status_code}: {response.text}", flush=True)
+        return False, task_name
+    return True, task_name
+
+
+def save_to_ideas(content, sender_name):
+    """寫進艾庭的點子暫存庫，狀態預設為待孵化。"""
+    data = {
+        "parent": {"type": "data_source_id", "data_source_id": NOTION_IDEAS_DB_ID},
+        "properties": {
+            "點子": {"title": [{"text": {"content": content}}]},
+            "日期": {"date": {"start": today_str()}},
+            "狀態": {"select": {"name": "💡 待孵化"}},
+            "備註": {"rich_text": [{"text": {"content": f"來自 LINE：{sender_name}"}}]},
+        },
+    }
+    response = requests.post("https://api.notion.com/v1/pages", headers=NOTION_HEADERS, json=data)
+    if response.status_code != 200:
+        print(f"[Notion idea error] {response.status_code}: {response.text}", flush=True)
+        return False
+    return True
+
 
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -52,35 +116,36 @@ def webhook():
         abort(400)
     return "OK"
 
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
-    sender_name = ""
-
     try:
         profile = line_bot_api.get_profile(event.source.user_id)
         sender_name = profile.display_name
     except Exception:
         sender_name = "群組成員"
 
-    if user_message.startswith("記錄 ") or user_message.startswith("記錄　"):
-        task_content = user_message[3:].strip()
-        if task_content:
-            success = save_to_notion(task_content, sender_name)
-            if success:
-                reply = f"✅ 已記錄：{task_content}"
-            else:
-                reply = "❌ 記錄失敗，請稍後再試"
+    kind, content = parse_command(user_message)
+
+    if kind == "task":
+        if content:
+            success, task_name = save_to_notion(content, sender_name)
+            reply = f"✅ 已記成待辦：{task_name}" if success else "❌ 待辦記錄失敗，請稍後再試"
         else:
-            reply = "請輸入要記錄的內容，例如：記錄 明天要備雞蛋"
+            reply = "請輸入待辦內容，例如：待辦：敦南補外帶吸管"
+    elif kind == "idea":
+        if content:
+            success = save_to_ideas(content, sender_name)
+            reply = f"💡 已收進點子庫：{content}" if success else "❌ 點子記錄失敗，請稍後再試"
+        else:
+            reply = "請輸入點子內容，例如：點子：做一款好初醬油菜單"
     else:
         response = model.generate_content(user_message)
         reply = response.text
 
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply)
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
