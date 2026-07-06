@@ -26,6 +26,10 @@ NOTION_HEADERS = {
     "Notion-Version": "2025-09-03",
 }
 
+# /notify 推播用：兩個都設在 Render 環境變數，缺任一個端點就拒絕服務
+NOTIFY_SECRET = os.environ.get("NOTIFY_SECRET")
+PIPI_USER_ID = os.environ.get("PIPI_USER_ID")
+
 
 def today_str():
     return datetime.now().strftime("%Y-%m-%d")
@@ -66,13 +70,19 @@ def format_task_name(raw):
 
 
 def save_to_notion(raw_content, sender_name):
-    """寫進後母的家，標題套命名規則，原話留在備註。"""
+    """寫進後母的家，符合好初 task 規格：填齊 Task／Date／類型／權重／狀態。
+    類型／權重固定預設為「雜務 ⭐️」（從 LINE 隨手丟的多半是雜務），少數其實是
+    專案的，皮皮整理時再改。標題套命名規則，原話留在備註。
+    """
     task_name = format_task_name(raw_content)
     data = {
         "parent": {"type": "data_source_id", "data_source_id": NOTION_DB_ID},
         "properties": {
             "Task": {"title": [{"text": {"content": task_name}}]},
             "Date": {"date": {"start": today_str()}},
+            "類型": {"select": {"name": "雜務"}},
+            "權重": {"select": {"name": "⭐️"}},
+            "狀態": {"status": {"name": "🔲 待處理"}},
             "備註": {"rich_text": [{"text": {"content": f"來自 LINE：{sender_name}（原話：{raw_content}）"}}]},
         },
     }
@@ -106,6 +116,23 @@ def health():
     return "OK", 200
 
 
+@app.route("/notify", methods=["POST"])
+def notify():
+    """給雲端排程 curl 用的推播端點：把提醒直接 push 到皮皮的 LINE。
+    需帶 X-Notify-Secret header，body 為 {"text": "..."}。
+    """
+    if not NOTIFY_SECRET or request.headers.get("X-Notify-Secret") != NOTIFY_SECRET:
+        abort(403)
+    if not PIPI_USER_ID:
+        return "PIPI_USER_ID not set", 503
+    payload = request.get_json(silent=True) or {}
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return "text required", 400
+    line_bot_api.push_message(PIPI_USER_ID, TextSendMessage(text=text[:4900]))
+    return "OK", 200
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers.get("X-Line-Signature", "")
@@ -125,6 +152,13 @@ def handle_message(event):
         sender_name = profile.display_name
     except Exception:
         sender_name = "群組成員"
+
+    if user_message.strip() == "我的ID":
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"你的 LINE user ID：\n{event.source.user_id}"),
+        )
+        return
 
     kind, content = parse_command(user_message)
 
