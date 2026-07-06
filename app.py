@@ -1,7 +1,7 @@
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, StickerSendMessage
 import google.generativeai as genai
 import requests
 import json
@@ -33,6 +33,18 @@ PIPI_USER_ID = os.environ.get("PIPI_USER_ID")
 
 # 四店群組廣播用：{"一店": "C群組ID", "二店": "...", "中山": "...", "敦南": "..."}
 STORE_GROUPS = json.loads(os.environ.get("STORE_GROUPS", "{}"))
+
+# 廣播附的官方貼圖，格式「packageId:stickerId」，留空＝不附貼圖
+BROADCAST_STICKER = os.environ.get("BROADCAST_STICKER", "")
+
+
+def broadcast_messages(content):
+    """組出廣播訊息列表：內文＋（可選）貼圖。同一次 push 內多個訊息只計 1 則額度。"""
+    messages = [TextSendMessage(text=content)]
+    if BROADCAST_STICKER and ":" in BROADCAST_STICKER:
+        pkg, stk = BROADCAST_STICKER.split(":", 1)
+        messages.append(StickerSendMessage(package_id=pkg.strip(), sticker_id=stk.strip()))
+    return messages
 
 
 def today_str():
@@ -131,9 +143,17 @@ def notify():
         return "PIPI_USER_ID not set", 503
     payload = request.get_json(silent=True) or {}
     text = (payload.get("text") or "").strip()
-    if not text:
-        return "text required", 400
-    line_bot_api.push_message(PIPI_USER_ID, TextSendMessage(text=text[:4900]))
+    sticker = payload.get("sticker") or {}
+    messages = []
+    if text:
+        messages.append(TextSendMessage(text=text[:4900]))
+    if sticker.get("packageId") and sticker.get("stickerId"):
+        messages.append(
+            StickerSendMessage(package_id=str(sticker["packageId"]), sticker_id=str(sticker["stickerId"]))
+        )
+    if not messages:
+        return "text or sticker required", 400
+    line_bot_api.push_message(PIPI_USER_ID, messages)
     return "OK", 200
 
 
@@ -190,7 +210,7 @@ def handle_message(event):
             sent, failed = [], []
             for store, gid in STORE_GROUPS.items():
                 try:
-                    line_bot_api.push_message(gid, TextSendMessage(text=content))
+                    line_bot_api.push_message(gid, broadcast_messages(content))
                     sent.append(store)
                 except Exception as e:
                     print(f"[broadcast error] {store}: {e}", flush=True)
