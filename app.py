@@ -109,6 +109,61 @@ def save_to_notion(raw_content, sender_name):
     return True, task_name
 
 
+def fetch_today_tasks():
+    """查後母的家：今日到期＋逾期的未完成項（狀態 ≠ ✅ 完成）。回傳 (今日, 逾期) 或 None。"""
+    today = today_str()
+    payload = {
+        "filter": {
+            "and": [
+                {"property": "Date", "date": {"on_or_before": today}},
+                {"property": "狀態", "status": {"does_not_equal": "✅ 完成"}},
+            ]
+        },
+        "sorts": [{"property": "Date", "direction": "ascending"}],
+        "page_size": 50,
+    }
+    resp = requests.post(
+        f"https://api.notion.com/v1/data_sources/{NOTION_DB_ID}/query",
+        headers=NOTION_HEADERS,
+        json=payload,
+    )
+    if resp.status_code != 200:
+        print(f"[Notion query error] {resp.status_code}: {resp.text}", flush=True)
+        return None
+    due_today, overdue = [], []
+    for page in resp.json().get("results", []):
+        props = page.get("properties", {})
+        name = "".join(t.get("plain_text", "") for t in props.get("Task", {}).get("title", [])) or "(未命名)"
+        date = (props.get("Date", {}).get("date") or {}).get("start", "")
+        stars = (props.get("權重", {}).get("select") or {}).get("name", "") or ""
+        item = f"{name} {stars}".strip()
+        if date == today:
+            due_today.append(item)
+        else:
+            overdue.append(f"{item}（{date[5:].replace('-', '/') if date else '?'}）")
+    return due_today, overdue
+
+
+def build_today_reply():
+    result = fetch_today_tasks()
+    if result is None:
+        return "❌ 查詢失敗，請稍後再試"
+    due_today, overdue = result
+    lines = [f"📋 今日待辦（{today_str()[5:].replace('-', '/')}）"]
+    if due_today:
+        lines += [f"{i}. {t}" for i, t in enumerate(due_today[:10], 1)]
+        if len(due_today) > 10:
+            lines.append(f"…另有 {len(due_today) - 10} 件")
+    else:
+        lines.append("今天沒有排定到期的待辦 🎉")
+    if overdue:
+        lines += ["", f"🔥 逾期 {len(overdue)} 件："]
+        lines += [f"・{t}" for t in overdue[:10]]
+        if len(overdue) > 10:
+            lines.append(f"…另有 {len(overdue) - 10} 件")
+    return "\n".join(lines)
+
+
 def save_to_ideas(content, sender_name):
     """寫進艾庭的點子暫存庫，狀態預設為待孵化。"""
     data = {
@@ -221,7 +276,17 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
+    if text in ("今天？", "今天?", "今天要做什麼"):
+        # 只回皮皮本人的 1:1，群組裡不理（避免任務清單外流到店群）
+        if event.source.type == "user" and event.source.user_id == PIPI_USER_ID:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=build_today_reply()))
+        return
+
     kind, content = parse_command(user_message)
+
+    # 群組裡只回應關鍵字指令，閒聊一律安靜——羅八已進四店群組，不能用 AI 回嘴洗版
+    if event.source.type != "user" and kind is None:
+        return
 
     if kind == "task":
         if content:
