@@ -4,6 +4,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
 import requests
+import json
 import os
 from datetime import datetime
 
@@ -29,6 +30,9 @@ NOTION_HEADERS = {
 # /notify 推播用：兩個都設在 Render 環境變數，缺任一個端點就拒絕服務
 NOTIFY_SECRET = os.environ.get("NOTIFY_SECRET")
 PIPI_USER_ID = os.environ.get("PIPI_USER_ID")
+
+# 四店群組廣播用：{"一店": "C群組ID", "二店": "...", "中山": "...", "敦南": "..."}
+STORE_GROUPS = json.loads(os.environ.get("STORE_GROUPS", "{}"))
 
 
 def today_str():
@@ -153,11 +157,48 @@ def handle_message(event):
     except Exception:
         sender_name = "群組成員"
 
-    if user_message.strip() == "我的ID":
+    text = user_message.strip()
+
+    if text == "我的ID":
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=f"你的 LINE user ID：\n{event.source.user_id}"),
         )
+        return
+
+    if text == "群組ID":
+        if event.source.type == "group":
+            reply = f"這個群組的 ID：\n{event.source.group_id}"
+        else:
+            reply = "請在群組裡對我說「群組ID」，我才能回報那個群組的 ID 喔"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    if text.startswith("發給四間店"):
+        # 只有皮皮本人在 1:1 私訊才能廣播，群組裡或其他人打一律擋下
+        if event.source.type != "user" or event.source.user_id != PIPI_USER_ID:
+            line_bot_api.reply_message(
+                event.reply_token, TextSendMessage(text="這個指令只有皮皮在 1:1 私訊可以用喔")
+            )
+            return
+        content = text[len("發給四間店"):].lstrip(" 　:：\t").strip()
+        if not content:
+            reply = "請帶上內容，例如：發給四間店：明天 iCHEF 菜單會更新"
+        elif not STORE_GROUPS:
+            reply = "還沒設定四店群組（STORE_GROUPS 環境變數是空的），先把群組 ID 收齊喔"
+        else:
+            sent, failed = [], []
+            for store, gid in STORE_GROUPS.items():
+                try:
+                    line_bot_api.push_message(gid, TextSendMessage(text=content))
+                    sent.append(store)
+                except Exception as e:
+                    print(f"[broadcast error] {store}: {e}", flush=True)
+                    failed.append(store)
+            reply = f"📣 已發送到：{'、'.join(sent) if sent else '（無）'}"
+            if failed:
+                reply += f"\n❌ 發送失敗：{'、'.join(failed)}"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
     kind, content = parse_command(user_message)
