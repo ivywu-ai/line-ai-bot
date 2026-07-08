@@ -249,16 +249,19 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    if text.startswith("發給四間店"):
-        # 只有皮皮本人在 1:1 私訊才能廣播，群組裡或其他人打一律擋下
-        if event.source.type != "user" or event.source.user_id != PIPI_USER_ID:
+    if text.startswith(("公告：", "公告:")):
+        # 冒號必帶：純聊天提到「公告」兩字不會誤觸廣播
+        # 群組裡出現「公告：」是夥伴正常發話，安靜略過；1:1 非皮皮才回拒絕
+        if event.source.type != "user":
+            return
+        if event.source.user_id != PIPI_USER_ID:
             line_bot_api.reply_message(
                 event.reply_token, TextSendMessage(text="這個指令只有皮皮在 1:1 私訊可以用喔")
             )
             return
-        content = text[len("發給四間店"):].lstrip(" 　:：\t").strip()
+        content = text[len("公告："):].strip()
         if not content:
-            reply = "請帶上內容，例如：發給四間店：明天 iCHEF 菜單會更新"
+            reply = "請帶上內容，例如：公告：明天 iCHEF 菜單會更新"
         elif not STORE_GROUPS:
             reply = "還沒設定四店群組（STORE_GROUPS 環境變數是空的），先把群組 ID 收齊喔"
         else:
